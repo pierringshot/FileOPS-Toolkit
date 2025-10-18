@@ -122,6 +122,7 @@ backup_duplicates_to: /mnt/e/Backup
 - Diskdə minimum boş yer (`min_free_bytes`)
 - Rsync versiyası və flag dəstəkləri (`--preallocate`, `--mkpath`)
 - SSH bağlantısı (əgər uzaq host göstərilibsə)
+- Uzaq hostlar üçün `remote_staging_dir` yazıla bilməlidir və parol istifadə olunursa `sshpass` mövcudluğu təsdiqlənməlidir
 
 ---
 
@@ -210,6 +211,7 @@ find /mnt/f /mnt/d -type f -iname '*.iso' -print0 |
 - **Duplikat Strategiyası** — `duplicates_policy` (`skip`, `archive`, `delete`) və `duplicates_archive_dir` ilə eyni məzmunlu fayllar üçün idarə olunan davranış.
 - **Verbosity Profiləri** — CLI çıxışını `minimal`, `standard`, `maximal` rejimlərinə bölür, menyuda da dinamik göstərilir.
 - **Interaktiv Konfiq Editoru** — menyuda yeni alt-menyu mənbə/destination/pattern/mode/dry-run kimi parametrləri redaktə edir və çatışmayan qovluqları avtomatik yaradır.
+- **Remote Staging & SSH Sync** — `remote_sources`, `remote_rsync_args`, `remote_staging_dir` parametrləri ilə `rsync` üzərindən uzaq hostları lokal keşə gətirir, menyuda idarə olunur, `sshpass` dəstəyi ilə parol/SSH açarı ilə işləyir.
 - **ASCII Banner** — CLI açılışında FileOps Toolkit üçün xüsusi ASCII art + müəllif imzası (PierringShot Electronics / github.com/pierringshot).
 
 

@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Union
 
+from .remote import RemoteSourceConfig, is_remote_target
+
 
 @dataclass(slots=True)
 class PreflightReport:
@@ -28,12 +30,15 @@ def _normalise_algorithms(value: Union[str, Sequence[str], None]) -> List[str]:
     return [item.lower() for item in value]
 
 
-def run_prechecks(cfg: Dict[str, Any]) -> PreflightReport:
+def run_prechecks(cfg: Dict[str, Any], remote_sources: Sequence[RemoteSourceConfig] | None = None) -> PreflightReport:
     report = PreflightReport()
     sources = cfg.get('sources', [])
     destination = Path(cfg.get('destination', '.')).expanduser()
 
     for src in sources:
+        if isinstance(src, str) and is_remote_target(src):
+            report.info.append(f'Remote source pending staging: {src}')
+            continue
         src_path = Path(src).expanduser()
         if not src_path.exists():
             report.errors.append(f'Source path missing: {src_path}')
@@ -51,7 +56,7 @@ def run_prechecks(cfg: Dict[str, Any]) -> PreflightReport:
     else:
         report.info.append(f'Destination ready: {destination}')
 
-    tools_to_check = ['find', 'rsync', 'xargs']
+    tools_to_check = ['find', 'rsync', 'xargs', 'ssh']
     for tool in tools_to_check:
         if shutil.which(tool):
             report.info.append(f'Command available: {tool}')
@@ -102,5 +107,22 @@ def run_prechecks(cfg: Dict[str, Any]) -> PreflightReport:
                 report.info.append(f'Free space check passed ({free} bytes available).')
         except Exception as exc:  # pragma: no cover - defensive
             report.warnings.append(f'Failed to evaluate free space: {exc}')
+
+    if remote_sources:
+        staging_dir = Path(cfg.get('remote_staging_dir', './data/remote_staging')).expanduser()
+        try:
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            report.info.append(f'Remote staging ready: {staging_dir}')
+        except Exception as exc:
+            report.errors.append(f'Cannot prepare remote staging dir {staging_dir}: {exc}')
+
+        for remote in remote_sources:
+            report.info.append(f'Remote source configured: {remote.target} -> {remote.name}')
+            if remote.identity_file and not remote.identity_file.exists():
+                report.errors.append(f'Identity file not found for {remote.target}: {remote.identity_file}')
+            if remote.password and not shutil.which('sshpass'):
+                report.errors.append(
+                    f'Password provided for {remote.target} but sshpass is unavailable.'
+                )
 
     return report

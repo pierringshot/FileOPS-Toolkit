@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='fileops_toolkit',
-    version='0.2.0',
+    version='0.3.0',
     description='Modular, parallel, and intelligent file deduplication & transfer system',
     author='FileOps Toolkit Authors',
     license='MIT',

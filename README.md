@@ -34,7 +34,7 @@ Author: PierringShot Electronics — https://github.com/pierringshot
 - 🧰 **Interactive Rich menu** – configure sources, policies, verbosity, and dry-run safety from a guided console with colour-coded feedback.
 - 📊 **Structured telemetry** – CSV / JSON artifacts, error funnel, live progress bars, and summarised run dashboards.
 - 🛡️ **Preflight & verification** – dependency checks, free-space validation, optional checksum verification after transfer.
-- 🔌 **SSH-ready foundations** – Paramiko-backed hooks for remote sources, surfaced in the supervisor and menu workflows.
+- 🌐 **Remote staging pipeline** – rsync/SSH targets staged into a local cache with key/password auth, parallel sync, and menu-driven management.
 
 ## 🗂️ Repository Layout
 
@@ -95,6 +95,15 @@ FileOPS-Toolkit/
   - `archive` – move duplicate to `duplicates_archive_dir`.
   - `delete` – remove duplicate from source after verification (honours `dry_run`).
 
+## 🌐 Remote Sources
+
+- Define remote rsync/SSH paths under `remote_sources`. Each entry accepts `target` (`user@host:/path`), optional `name`, `identity_file`, `password` (requires `sshpass`), `ssh_options`, and bespoke `rsync_args`.
+- Remote targets are staged into `remote_staging_dir` before discovery. The toolkit reuses your standard dedup/transfer policy once files are cached locally.
+- `remote_rsync_args` sets shared defaults (e.g., `-avz --info=progress2`), while `remote_parallel_workers` controls how many remotes sync concurrently.
+- Manage remote endpoints via the menu: `menu → Remote source management` (or Configuration Editor option `9`). Add/update/remove targets, tweak staging, and adjust parallelism without editing YAML manually.
+- For password auth, install `sshpass` or rely on SSH agents/keys. Staging honours `dry_run`, but remote dry-runs only list metadata—they do not fetch binaries.
+- `scan` command previews local sources only; run `precheck` or `run` to stage remote content when required.
+
 ## 🔍 Pattern Matching
 
 The discovery layer supports both simple extension filters and complex patterns:
@@ -137,6 +146,10 @@ sources:
   - /mnt/d
   - /mnt/f
   - /mnt/h
+remote_sources:
+  - target: pierringshot@10.249.162.31:~/Desktop/WABACore.AI/
+    name: wabacore-ai
+    rsync_args: ['-avz', '--info=progress2']
 destination: /mnt/e
 extensions: ['iso', 'ISO']
 patterns: ['*.iso', '*.ISO']
@@ -149,6 +162,9 @@ checksum_algo: ['md5']      # list of algorithms (md5, sha1, xxh128, ...)
 deduplication_policy: prefer_newer
 duplicates_policy: delete   # skip | archive | delete
 duplicates_archive_dir: ./data/duplicates  # required when duplicates_policy: archive
+remote_staging_dir: ./data/remote_staging
+remote_rsync_args: ['-avz', '--info=progress2']
+remote_parallel_workers: 2
 transfer_tool: rsync
 rsync_args:
   - "-aHAX"
@@ -217,7 +233,7 @@ pip install -r requirements.txt
 
 - Use `python -m compileall src` or the provided smoke tests before large runbooks.
 - Exercise both `flatten` and `mirror` modes with sample data to validate duplicate policies (`archive` moves files into `duplicates_archive_dir`).
-- When enabling SSH sources, populate the credentials via Paramiko and verify reachability with `menu → 8`.
+- When enabling remote sources, manage targets via `menu → Remote source management`; run `precheck` to confirm staging prereqs and `sshpass` availability when storing passwords.
 - For destructive duplicate actions (`delete`), confirm `dry_run: false` is intentional.
 
 ## 📜 License

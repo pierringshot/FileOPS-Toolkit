@@ -3,6 +3,12 @@ sources:
 - /mnt/d
 - /mnt/f
 - /mnt/h
+remote_sources:
+- target: pierringshot@10.249.162.31:~/Desktop/WABACore.AI/
+  name: wabacore-ai
+  rsync_args:
+  - "-avz"
+  - "--info=progress2"
 destination: /mnt/e
 extensions:
 - iso
@@ -19,6 +25,11 @@ checksum_algo:
 - md5
 deduplication_policy: prefer_newer
 duplicates_policy: delete
+remote_staging_dir: ./data/remote_staging
+remote_rsync_args:
+- "-avz"
+- "--info=progress2"
+remote_parallel_workers: 2
 transfer_tool: rsync
 rsync_args:
 - -aHAX

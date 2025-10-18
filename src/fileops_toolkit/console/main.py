@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import shlex
 from datetime import datetime
 from enum import Enum
+from getpass import getpass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import click
 from rich import box
@@ -31,6 +33,7 @@ from ..discovery.engine import DiscoveredFile, discover_files
 from ..metadata.scanner import get_file_metadata
 from ..pipeline import OperationOutcome, PipelineStats, execute_pipeline
 from ..prechecks import PreflightReport, run_prechecks
+from ..remote import extract_remote_sources, sanitize_label, is_remote_target
 from .banner import BANNER_ART, BANNER_TITLE, BANNER_AUTHOR
 
 LAST_STATS: Optional[PipelineStats] = None
@@ -74,6 +77,25 @@ def _store_session(stats: PipelineStats, results: List[DedupResult], outcomes: L
     LAST_STATS = stats
     LAST_RESULTS = results
     LAST_OUTCOMES = outcomes
+
+
+def _save_config(cfg_path: Path, cfg: dict) -> None:
+    with cfg_path.open('w', encoding='utf-8') as fh:
+        yaml.safe_dump(cfg, fh, sort_keys=False)
+
+
+def _entry_target(entry: object) -> str:
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        target = entry.get('target')
+        if target:
+            return target
+        host = entry.get('host') or entry.get('user') or entry.get('username')
+        path = entry.get('path')
+        if host and path:
+            return f'{host}:{path}'
+    return ''
 
 
 def _human_size(num_bytes: int) -> str:
@@ -260,51 +282,67 @@ def _show_retry_queue(console: Console) -> None:
     console.print('[dim]Re-run the pipeline to attempt failed transfers again.[/dim]')
 
 
-def _show_ssh_sources(console: Console, cfg: dict) -> None:
-    remote = [src for src in cfg.get('sources', []) if ':' in src or src.startswith('ssh://')]
-    if not remote:
-        console.print('[green]No SSH sources configured.[/green]')
-        return
-    table = Table(title='SSH Sources', box=box.SIMPLE, header_style='bold cyan')
-    table.add_column('Source', overflow='fold')
-    for src in remote:
-        table.add_row(src)
-    console.print(table)
-
-
-def _interactive_config_menu(console: Console, cfg_path: Path) -> None:
-    cfg = load_config(cfg_path)
-
-    def _save() -> None:
-        with cfg_path.open('w', encoding='utf-8') as fh:
-            yaml.safe_dump(cfg, fh, sort_keys=False)
-        console.print('[green]Configuration updated.[/green]')
-
+def _remote_sources_menu(console: Console, cfg_path: Path) -> None:
     while True:
-        overview = Table(title='Configuration Editor', box=box.SIMPLE_HEAVY, header_style='bold cyan')
-        overview.add_column('Key', style='bold white')
-        overview.add_column('Value', style='white', overflow='fold')
-        overview.add_row('Sources', ', '.join(cfg.get('sources', [])))
-        overview.add_row('Destination', str(cfg.get('destination')))
-        overview.add_row('Patterns', ', '.join(cfg.get('patterns', []) or ['<none>']))
-        overview.add_row('Extensions', ', '.join(cfg.get('extensions', []) or ['<none>']))
-        overview.add_row('Operation mode', cfg.get('operation_mode', 'flatten'))
-        overview.add_row('Duplicates policy', cfg.get('duplicates_policy', 'skip'))
-        overview.add_row('Duplicates archive dir', str(cfg.get('duplicates_archive_dir', '<unset>')))
-        overview.add_row('Verbosity', cfg.get('verbosity', 'standard'))
-        overview.add_row('Dry run', str(cfg.get('dry_run', True)))
-        console.print(overview)
+        cfg = load_config(cfg_path)
+        remote_entries = list(cfg.get('remote_sources', []))
+        _, remote_configs = extract_remote_sources(cfg)
+        remote_by_target = {config.target: config for config in remote_configs}
+        staging_dir = Path(cfg.get('remote_staging_dir', './data/remote_staging')).expanduser()
+        default_args = ' '.join(cfg.get('remote_rsync_args', [])) if cfg.get('remote_rsync_args') else '<default>'
+        parallel = cfg.get('remote_parallel_workers', cfg.get('parallel_workers', 1))
 
-        options: Dict[str, str] = {
-            '1': 'Add source path',
-            '2': 'Remove source path',
-            '3': 'Set destination',
-            '4': 'Set operation mode',
-            '5': 'Configure duplicate handling',
-            '6': 'Edit file patterns',
-            '7': 'Set verbosity',
-            '8': 'Toggle dry-run default',
-            '0': 'Back to main menu',
+        table = Table(title='Remote Source Manager', box=box.SIMPLE_HEAVY, header_style='bold cyan')
+        table.add_column('#', justify='right', style='bold white')
+        table.add_column('Name', style='white')
+        table.add_column('Target', style='white', overflow='fold')
+        table.add_column('Staging dir', style='white', overflow='fold')
+        table.add_column('Auth', style='white')
+        table.add_column('Rsync args', style='white', overflow='fold')
+
+        if remote_entries:
+            for idx, entry in enumerate(remote_entries, start=1):
+                target = _entry_target(entry)
+                config = remote_by_target.get(target)
+                alias = entry.get('name', '') if isinstance(entry, dict) else ''
+                alias = alias or (config.name if config else sanitize_label(target))
+                staging_path = staging_dir / alias
+                auth = 'password' if isinstance(entry, dict) and entry.get('password') else 'key/agent'
+                args = ' '.join(entry.get('rsync_args', [])) if isinstance(entry, dict) and entry.get('rsync_args') else '<default>'
+                table.add_row(
+                    str(idx),
+                    alias,
+                    target or '<invalid>',
+                    str(staging_path),
+                    auth,
+                    args,
+                )
+        else:
+            table.add_row('-', '<none>', '<none>', str(staging_dir), '-', default_args)
+
+        console.print(table)
+        console.print(f'[dim]Staging directory:[/dim] {staging_dir}')
+        console.print(f'[dim]Default rsync args:[/dim] {default_args}')
+        console.print(f'[dim]Parallel workers:[/dim] {parallel}')
+
+        inline_remote = [
+            str(src) for src in cfg.get('sources', [])
+            if isinstance(src, str) and is_remote_target(src)
+        ]
+        inline_only = [src for src in inline_remote if src not in { _entry_target(entry) for entry in remote_entries }]
+        if inline_only:
+            console.print('[yellow]Inline remote entries detected under "sources":[/yellow]')
+            for src in inline_only:
+                console.print(f'  - {src}')
+            console.print('[dim]Remove inline entries or re-add them via this menu for full management.[/dim]')
+
+        options = {
+            '1': 'Add remote source',
+            '2': 'Remove remote source',
+            '3': 'Set staging directory',
+            '4': 'Set default rsync args',
+            '5': 'Set remote parallel workers',
+            '0': 'Back',
         }
         opt_table = Table(box=box.SIMPLE, header_style='bold cyan')
         opt_table.add_column('Option', justify='right', style='bold white')
@@ -315,70 +353,99 @@ def _interactive_config_menu(console: Console, cfg_path: Path) -> None:
 
         choice = Prompt.ask('Select option', choices=list(options.keys()), default='0')
         if choice == '0':
-            _save()
-            return
+            break
         if choice == '1':
-            new_source = Prompt.ask('Enter new source path')
-            if new_source:
-                path = Path(new_source).expanduser()
-                path.mkdir(parents=True, exist_ok=True)
-                sources = list(cfg.get('sources', []))
-                if new_source not in sources:
-                    sources.append(new_source)
-                cfg['sources'] = sources
-        elif choice == '2':
-            sources = list(cfg.get('sources', []))
-            if not sources:
-                console.print('[yellow]No sources to remove.[/yellow]')
+            target = Prompt.ask('Remote rsync target (e.g. user@host:/path)')
+            if not target:
                 continue
-            for idx, src in enumerate(sources, start=1):
-                console.print(f'{idx}) {src}')
+            if not is_remote_target(target):
+                confirm = Prompt.ask(
+                    'Target does not look like an rsync/SSH path. Continue?',
+                    choices=['y', 'n'],
+                    default='n',
+                )
+                if confirm.lower() != 'y':
+                    continue
+            alias_default = sanitize_label(target)
+            alias = Prompt.ask('Local alias (folder name under staging dir)', default=alias_default)
+            identity = Prompt.ask('Identity file (blank to skip)', default='').strip()
+            use_password = Prompt.ask('Store SSH password? [y/N]', choices=['y', 'n'], default='n')
+            password = ''
+            if use_password.lower() == 'y':
+                password = getpass('Enter SSH password (input hidden): ') or ''
+            ssh_opts_raw = Prompt.ask('Additional ssh options (space separated, blank to skip)', default='')
+            rsync_args_raw = Prompt.ask(
+                'Custom rsync args (space separated, blank for default)',
+                default='',
+            )
+            entry_dict: Dict[str, Any] = {'target': target}
+            if alias:
+                entry_dict['name'] = alias
+            if identity:
+                entry_dict['identity_file'] = identity
+            if password:
+                entry_dict['password'] = password
+            if ssh_opts_raw.strip():
+                entry_dict['ssh_options'] = shlex.split(ssh_opts_raw)
+            if rsync_args_raw.strip():
+                entry_dict['rsync_args'] = shlex.split(rsync_args_raw)
+
+            existing_targets = {_entry_target(item) for item in remote_entries}
+            if target in existing_targets:
+                console.print('[yellow]A remote source with this target already exists and will be updated.[/yellow]')
+                for idx, item in enumerate(remote_entries):
+                    if _entry_target(item) == target:
+                        remote_entries[idx] = entry_dict
+                        break
+            else:
+                remote_entries.append(entry_dict)
+            cfg['remote_sources'] = remote_entries
+            _save_config(cfg_path, cfg)
+            console.print('[green]Remote source saved.[/green]')
+        elif choice == '2':
+            if not remote_entries:
+                console.print('[yellow]No remote sources to remove.[/yellow]')
+                continue
             selection = Prompt.ask('Enter number to remove (0 to cancel)', default='0')
             if selection.isdigit():
                 idx = int(selection)
-                if 1 <= idx <= len(sources):
-                    removed = sources.pop(idx - 1)
-                    console.print(f'[red]Removed[/red] {removed}')
-                    cfg['sources'] = sources
+                if 1 <= idx <= len(remote_entries):
+                    removed = remote_entries.pop(idx - 1)
+                    cfg['remote_sources'] = remote_entries
+                    _save_config(cfg_path, cfg)
+                    console.print(f"[red]Removed remote[/red] {_entry_target(removed) or '<unknown>'}")
         elif choice == '3':
-            destination = Prompt.ask('Destination path', default=str(cfg.get('destination')))
-            if destination:
-                dest_path = Path(destination).expanduser()
-                dest_path.mkdir(parents=True, exist_ok=True)
-                cfg['destination'] = destination
+            current = str(cfg.get('remote_staging_dir', './data/remote_staging'))
+            path_value = Prompt.ask('Remote staging directory', default=current)
+            if path_value:
+                cfg['remote_staging_dir'] = path_value
+                _save_config(cfg_path, cfg)
+                console.print(f'[green]Staging directory set to[/green] {path_value}')
         elif choice == '4':
-            mode = Prompt.ask('Operation mode', choices=['flatten', 'mirror'], default=cfg.get('operation_mode', 'flatten'))
-            cfg['operation_mode'] = mode
-            if mode == 'mirror':
-                prefix = Prompt.ask(
-                    'Prefix preserved structure with source root name?',
-                    choices=['yes', 'no'],
-                    default='yes' if cfg.get('mirror_prefix_with_root', True) else 'no',
-                )
-                cfg['mirror_prefix_with_root'] = prefix == 'yes'
+            current = ' '.join(cfg.get('remote_rsync_args', []))
+            default_prompt = current or '-avz --info=progress2'
+            args_value = Prompt.ask('Default remote rsync args (blank to reset)', default=default_prompt)
+            if args_value.strip():
+                cfg['remote_rsync_args'] = shlex.split(args_value)
+            else:
+                cfg.pop('remote_rsync_args', None)
+            _save_config(cfg_path, cfg)
+            console.print('[green]Default remote rsync args updated.[/green]')
         elif choice == '5':
-            policy = Prompt.ask('Duplicates policy', choices=['skip', 'archive', 'delete'], default=cfg.get('duplicates_policy', 'skip'))
-            cfg['duplicates_policy'] = policy
-            if policy == 'archive':
-                archive_dir = Prompt.ask('Archive duplicates to directory', default=str(cfg.get('duplicates_archive_dir', './logs/duplicates')))
-                Path(archive_dir).expanduser().mkdir(parents=True, exist_ok=True)
-                cfg['duplicates_archive_dir'] = archive_dir
-            else:
-                cfg.pop('duplicates_archive_dir', None)
-        elif choice == '6':
-            current = ','.join(cfg.get('patterns', []) or [])
-            response = Prompt.ask('Enter comma-separated patterns (empty to clear)', default=current)
-            if response.strip():
-                patterns = [item.strip() for item in response.split(',') if item.strip()]
-                cfg['patterns'] = patterns
-            else:
-                cfg.pop('patterns', None)
-        elif choice == '7':
-            verbosity = Prompt.ask('Verbosity', choices=[v.value for v in Verbosity], default=cfg.get('verbosity', 'standard'))
-            cfg['verbosity'] = verbosity
-        elif choice == '8':
-            cfg['dry_run'] = not cfg.get('dry_run', True)
-            console.print(f"[cyan]dry_run set to[/cyan] {cfg['dry_run']}")
+            current = str(cfg.get('remote_parallel_workers', cfg.get('parallel_workers', 1)))
+            value = Prompt.ask('Remote parallel workers', default=current)
+            try:
+                remote_workers = max(1, int(value))
+            except ValueError:
+                console.print('[red]Please enter a positive integer.[/red]')
+                continue
+            cfg['remote_parallel_workers'] = remote_workers
+            _save_config(cfg_path, cfg)
+            console.print('[green]Remote parallel workers updated.[/green]')
+
+        console.print()
+
+
 @click.group()
 def cli() -> None:
     """FileOps Toolkit CLI."""
@@ -398,7 +465,13 @@ def scan(config_path: str, verbose: bool, verbosity_option: Optional[str], no_co
     verbosity = Verbosity.MAXIMAL if verbose else _resolve_verbosity(verbosity_option, fallback=cfg.get('verbosity'))
     CURRENT_VERBOSITY = verbosity
 
-    sources = cfg['sources']
+    local_sources, remote_sources = extract_remote_sources(cfg)
+    sources = local_sources
+    if remote_sources:
+        console.print('[yellow]Remote sources detected. Scan previews local paths only; use precheck/run to stage remote data.[/yellow]')
+    if not sources:
+        console.print('[bold yellow]No local sources configured to scan.[/bold yellow]')
+        return
     extensions = cfg.get('extensions')
     checksum_algo = cfg.get('checksum_algo')
     patterns = cfg.get('patterns')
@@ -475,7 +548,10 @@ def precheck(config_path: str, no_color: bool) -> None:
     console = Console(no_color=no_color)
     cfg = load_config(Path(config_path))
     _maybe_show_banner(console)
-    report = run_prechecks(cfg)
+    local_sources, remote_sources = extract_remote_sources(cfg)
+    precheck_cfg = dict(cfg)
+    precheck_cfg['sources'] = local_sources
+    report = run_prechecks(precheck_cfg, remote_sources=remote_sources)
     _render_precheck(console, report)
     if report.errors:
         raise click.ClickException('Prechecks reported blocking issues.')
@@ -553,7 +629,7 @@ def menu(config_path: str, no_color: bool) -> None:
         '5': 'Review dedup decisions',
         '6': 'View CSV/JSON logs',
         '7': 'Manage retry queue',
-        '8': 'SSH source management',
+        '8': 'Remote source management',
         '9': 'Stop / Resume operations',
         '0': 'Exit',
     }
@@ -615,7 +691,7 @@ def menu(config_path: str, no_color: bool) -> None:
         elif choice == '7':
             _show_retry_queue(console)
         elif choice == '8':
-            _show_ssh_sources(console, cfg)
+            _remote_sources_menu(console, cfg_path)
         elif choice == '9':
             console.print('[dim]Pipeline runs synchronously; restart a run to resume operations.[/dim]')
         console.print()
@@ -623,3 +699,141 @@ def menu(config_path: str, no_color: bool) -> None:
 
 if __name__ == '__main__':  # pragma: no cover
     cli()
+def _interactive_config_menu(console: Console, cfg_path: Path) -> None:
+    cfg = load_config(cfg_path)
+
+    while True:
+        overview = Table(title='Configuration Editor', box=box.SIMPLE_HEAVY, header_style='bold cyan')
+        overview.add_column('Key', style='bold white')
+        overview.add_column('Value', style='white', overflow='fold')
+        overview.add_row('Sources', ', '.join(cfg.get('sources', [])))
+        overview.add_row('Destination', str(cfg.get('destination')))
+        overview.add_row('Patterns', ', '.join(cfg.get('patterns', []) or ['<none>']))
+        overview.add_row('Extensions', ', '.join(cfg.get('extensions', []) or ['<none>']))
+        overview.add_row('Operation mode', cfg.get('operation_mode', 'flatten'))
+        overview.add_row('Duplicates policy', cfg.get('duplicates_policy', 'skip'))
+        overview.add_row('Duplicates archive dir', str(cfg.get('duplicates_archive_dir', '<unset>')))
+        remote_count = len(cfg.get('remote_sources', []))
+        overview.add_row('Remote sources', str(remote_count))
+        overview.add_row('Remote staging dir', str(cfg.get('remote_staging_dir', './data/remote_staging')))
+        overview.add_row('Verbosity', cfg.get('verbosity', 'standard'))
+        overview.add_row('Dry run', str(cfg.get('dry_run', True)))
+        console.print(overview)
+
+        options: Dict[str, str] = {
+            '1': 'Add source path',
+            '2': 'Remove source path',
+            '3': 'Set destination',
+            '4': 'Set operation mode',
+            '5': 'Configure duplicate handling',
+            '6': 'Edit file patterns',
+            '7': 'Set verbosity',
+            '8': 'Toggle dry-run default',
+            '9': 'Manage remote sources',
+            '0': 'Back to main menu',
+        }
+        opt_table = Table(box=box.SIMPLE, header_style='bold cyan')
+        opt_table.add_column('Option', justify='right', style='bold white')
+        opt_table.add_column('Description', style='white')
+        for key, desc in options.items():
+            opt_table.add_row(key, desc)
+        console.print(opt_table)
+
+        choice = Prompt.ask('Select option', choices=list(options.keys()), default='0')
+        if choice == '0':
+            return
+        if choice == '1':
+            new_source = Prompt.ask('Enter new source path')
+            if new_source:
+                path = Path(new_source).expanduser()
+                path.mkdir(parents=True, exist_ok=True)
+                sources = list(cfg.get('sources', []))
+                if new_source not in sources:
+                    sources.append(new_source)
+                    cfg['sources'] = sources
+                    _save_config(cfg_path, cfg)
+                    console.print('[green]Source added.[/green]')
+                else:
+                    console.print('[yellow]Source already present.[/yellow]')
+            continue
+        if choice == '2':
+            sources = list(cfg.get('sources', []))
+            if not sources:
+                console.print('[yellow]No sources to remove.[/yellow]')
+                continue
+            for idx, src in enumerate(sources, start=1):
+                console.print(f'{idx}) {src}')
+            selection = Prompt.ask('Enter number to remove (0 to cancel)', default='0')
+            if selection.isdigit():
+                idx = int(selection)
+                if 1 <= idx <= len(sources):
+                    removed = sources.pop(idx - 1)
+                    cfg['sources'] = sources
+                    _save_config(cfg_path, cfg)
+                    console.print(f'[red]Removed[/red] {removed}')
+                else:
+                    console.print('[yellow]Selection out of range.[/yellow]')
+            else:
+                console.print('[yellow]Invalid selection.[/yellow]')
+            continue
+        if choice == '3':
+            destination = Prompt.ask('Destination path', default=str(cfg.get('destination')))
+            if destination:
+                dest_path = Path(destination).expanduser()
+                dest_path.mkdir(parents=True, exist_ok=True)
+                cfg['destination'] = destination
+                _save_config(cfg_path, cfg)
+                console.print('[green]Destination updated.[/green]')
+            continue
+        if choice == '4':
+            mode = Prompt.ask('Operation mode', choices=['flatten', 'mirror'], default=cfg.get('operation_mode', 'flatten'))
+            cfg['operation_mode'] = mode
+            if mode == 'mirror':
+                prefix = Prompt.ask(
+                    'Prefix preserved structure with source root name?',
+                    choices=['yes', 'no'],
+                    default='yes' if cfg.get('mirror_prefix_with_root', True) else 'no',
+                )
+                cfg['mirror_prefix_with_root'] = prefix == 'yes'
+            _save_config(cfg_path, cfg)
+            console.print('[green]Operation mode updated.[/green]')
+            continue
+        if choice == '5':
+            policy = Prompt.ask('Duplicates policy', choices=['skip', 'archive', 'delete'], default=cfg.get('duplicates_policy', 'skip'))
+            cfg['duplicates_policy'] = policy
+            if policy == 'archive':
+                archive_dir = Prompt.ask('Archive duplicates to directory', default=str(cfg.get('duplicates_archive_dir', './logs/duplicates')))
+                Path(archive_dir).expanduser().mkdir(parents=True, exist_ok=True)
+                cfg['duplicates_archive_dir'] = archive_dir
+            else:
+                cfg.pop('duplicates_archive_dir', None)
+            _save_config(cfg_path, cfg)
+            console.print('[green]Duplicate handling updated.[/green]')
+            continue
+        if choice == '6':
+            current = ','.join(cfg.get('patterns', []) or [])
+            response = Prompt.ask('Enter comma-separated patterns (empty to clear)', default=current)
+            if response.strip():
+                patterns = [item.strip() for item in response.split(',') if item.strip()]
+                cfg['patterns'] = patterns
+            else:
+                cfg.pop('patterns', None)
+            _save_config(cfg_path, cfg)
+            console.print('[green]Patterns updated.[/green]')
+            continue
+        if choice == '7':
+            verbosity = Prompt.ask('Verbosity', choices=[v.value for v in Verbosity], default=cfg.get('verbosity', 'standard'))
+            cfg['verbosity'] = verbosity
+            _save_config(cfg_path, cfg)
+            console.print('[green]Verbosity updated.[/green]')
+            continue
+        if choice == '8':
+            cfg['dry_run'] = not cfg.get('dry_run', True)
+            _save_config(cfg_path, cfg)
+            console.print(f"[cyan]dry_run set to[/cyan] {cfg['dry_run']}")
+            continue
+        if choice == '9':
+            _remote_sources_menu(console, cfg_path)
+            cfg = load_config(cfg_path)
+            continue
+        console.print('[yellow]Unknown option.[/yellow]')

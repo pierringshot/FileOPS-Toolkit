@@ -29,6 +29,7 @@ from .prechecks import PreflightReport, run_prechecks
 from .supervisor.manager import WorkerSupervisor
 from .transfer.engine import TransferOutcome, transfer_file
 from .verification.engine import verify_file
+from .remote import extract_remote_sources, stage_remote_sources
 
 
 ChecksumConfig = Optional[Union[str, Sequence[str]]]
@@ -149,7 +150,7 @@ def execute_pipeline(
     dry_run_override: Optional[bool] = None,
 ) -> Tuple[PipelineStats, List[DedupResult], List[OperationOutcome]]:
     """Execute the full FileOps pipeline."""
-    sources = cfg['sources']
+    local_sources, remote_sources = extract_remote_sources(cfg)
     extensions = cfg.get('extensions')
     destination = Path(cfg['destination']).expanduser()
     backup_dir = Path(cfg['backup_duplicates_to']).expanduser() if cfg.get('backup_duplicates_to') else None
@@ -173,15 +174,38 @@ def execute_pipeline(
     if duplicate_action == 'archive' and not duplicate_archive_dir:
         raise RuntimeError('duplicates_policy is set to archive but duplicates_archive_dir is not configured.')
 
+    remote_staging_dir = Path(cfg.get('remote_staging_dir', './data/remote_staging'))
+    remote_parallel = int(cfg.get('remote_parallel_workers', parallel_workers))
+    remote_default_args = cfg.get('remote_rsync_args') or cfg.get('rsync_args')
+
     run_id = uuid.uuid4().hex
     start_time = time.monotonic()
-    report = run_prechecks(cfg)
+    precheck_cfg = dict(cfg)
+    precheck_cfg['sources'] = local_sources
+    report = run_prechecks(precheck_cfg, remote_sources=remote_sources)
     if report.errors:
         raise RuntimeError('Prechecks failed:\n' + '\n'.join(report.errors))
 
+    staged_remote = stage_remote_sources(
+        remote_sources,
+        staging_root=remote_staging_dir,
+        default_rsync_args=remote_default_args,
+        dry_run=dry_run,
+        parallelism=remote_parallel,
+        console=console,
+    )
+
+    for result in staged_remote:
+        stage_note = 'Remote staged' if not result.dry_run else 'Remote staged (dry-run)'
+        report.info.append(f'{stage_note}: {result.config.target} -> {result.staging_path}')
+
+    effective_sources = [
+        str(Path(src).expanduser()) for src in local_sources
+    ] + [str(item.staging_path) for item in staged_remote]
+
     discovered: List[DiscoveredFile] = list(
         discover_files(
-            sources,
+            effective_sources or [],
             extensions,
             patterns=patterns,
             pattern_mode=pattern_mode,
