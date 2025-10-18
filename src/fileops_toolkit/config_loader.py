@@ -13,7 +13,7 @@ from typing import Any, Dict
 import yaml
 
 
-REQUIRED_KEYS = ['sources', 'destination', 'extensions']
+REQUIRED_KEYS = ['sources', 'destination']
 
 
 def load_config(path: Path) -> Dict[str, Any]:
@@ -33,4 +33,6 @@ def load_config(path: Path) -> Dict[str, Any]:
     missing = [key for key in REQUIRED_KEYS if key not in cfg]
     if missing:
         raise ValueError(f'Missing required configuration keys: {missing}')
+    if 'extensions' not in cfg and 'patterns' not in cfg:
+        raise ValueError("Configuration must define either 'extensions' or 'patterns'.")
     return cfg

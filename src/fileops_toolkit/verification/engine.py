@@ -1,29 +1,63 @@
 """Verification module for FileOps Toolkit.
 
 After files are transferred, this module checks that the destination file
-matches the source file in size and (optionally) checksum.
+matches the source file in size and (optionally) checksum(s).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional, Sequence, Union
 
-from ..metadata.scanner import compute_checksum
+from ..metadata.scanner import FileMetadata, compute_checksum
+
+ChecksumRequest = Optional[Union[str, Sequence[str]]]
 
 
-def verify_file(src: Path, dst: Path, checksum_algo: Optional[str] = None) -> bool:
+def _normalise(request: ChecksumRequest) -> Sequence[str]:
+    if request is None:
+        return ()
+    if isinstance(request, str):
+        return (request.lower(),)
+    return tuple(algo.lower() for algo in request)
+
+
+def verify_file(
+    src: Path,
+    dst: Path,
+    checksum_algos: ChecksumRequest = None,
+    src_metadata: Optional[FileMetadata] = None,
+) -> bool:
     """Verify that ``dst`` matches ``src``.
 
-    This function checks that the file sizes match and, if a checksum
-    algorithm is provided, that the checksums are identical.  Returns
-    ``True`` if verification succeeds, otherwise ``False``.
+    Args:
+        src: Source file path.
+        dst: Destination file path.
+        checksum_algos: Optional checksum algorithm(s) to compare.
+        src_metadata: Optional metadata with precomputed checksums.
     """
     try:
-        if src.stat().st_size != dst.stat().st_size:
-            return False
-        if checksum_algo:
-            return compute_checksum(src, checksum_algo) == compute_checksum(dst, checksum_algo)
-        return True
+        src_stat = src.stat()
+        dst_stat = dst.stat()
     except FileNotFoundError:
         return False
+
+    if src_stat.st_size != dst_stat.st_size:
+        return False
+
+    algorithms = _normalise(checksum_algos)
+    if not algorithms:
+        return True
+
+    src_checksums: Mapping[str, str] = {}
+    if src_metadata:
+        src_checksums = {k.lower(): v for k, v in src_metadata.checksums.items()}
+
+    for algo in algorithms:
+        src_checksum = src_checksums.get(algo)
+        if src_checksum is None:
+            src_checksum = compute_checksum(src, algo)
+        dst_checksum = compute_checksum(dst, algo)
+        if src_checksum != dst_checksum:
+            return False
+    return True

@@ -1,22 +1,41 @@
 sources:
-  - /mnt/f
-  - /mnt/d
-destination: /mnt/e/ISO
-extensions: ['iso', 'ISO']
-parallel_workers: 12
-checksum_algo: xxh128
+- /mnt/c
+- /mnt/d
+- /mnt/f
+- /mnt/h
+destination: /mnt/e
+extensions:
+- iso
+- ISO
+patterns:
+- '*.iso'
+- '*.ISO'
+pattern_mode: glob
+pattern_case_sensitive: false
+operation_mode: flatten
+mirror_prefix_with_root: true
+parallel_workers: 24
+checksum_algo:
+- md5
 deduplication_policy: prefer_newer
+duplicates_policy: delete
 transfer_tool: rsync
 rsync_args:
-  - "-aHAX"
-  - "--sparse"
-  - "--preallocate"
-  - "--partial"
-  - "--info=progress2,stats4"
+- -aHAX
+- --sparse
+- --preallocate
+- --partial
+- --info=progress2,stats4
+max_retries: 3
+retry_backoff_seconds: 1.0
+retry_backoff_multiplier: 2.0
 logging:
   dir: ./logs
   csv_file: operations-$(date +%F_%T).csv
-  json_file: summary.json
-dry_run: true
+  json_file: summary-$(run_id).json
+  errors_file: errors.log
+dry_run: false
 verify_after_transfer: true
-backup_duplicates_to: /mnt/e/Backup
+backup_duplicates_to: ./data/backup
+min_free_bytes: 10737418240
+verbosity: maximal

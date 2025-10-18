@@ -1,15 +1,15 @@
 """Worker supervisor for FileOps Toolkit.
 
-A placeholder class responsible for orchestrating multiple worker
-processes/threads, tracking progress, handling retries and providing
-hooks for graceful shutdown and resume.  Real implementations may use
-``concurrent.futures`` or ``asyncio`` to achieve parallelism.
+Uses a thread pool to execute callable tasks with progress callbacks and
+simple cancellation support.
 """
 
 from __future__ import annotations
 
-import threading
-from typing import Callable, Iterable, Optional
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from typing import Callable, Iterable, Iterator, List, Optional, TypeVar
+
+T = TypeVar('T')
 
 
 class WorkerSupervisor:
@@ -17,27 +17,45 @@ class WorkerSupervisor:
 
     def __init__(self, max_workers: int = 4):
         self.max_workers = max_workers
-        self._threads: list[threading.Thread] = []
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._futures: List[Future[T]] = []
 
-    def run_tasks(self, tasks: Iterable[Callable[[], None]]) -> None:
-        """Run a collection of no‑arg callables in parallel.
+    def __enter__(self) -> 'WorkerSupervisor':
+        self._executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix='fileops-worker')
+        return self
 
-        Starts up to ``max_workers`` threads and executes tasks from the
-        iterable.  Excess tasks are run sequentially after threads finish.
-        """
-        tasks_iter = iter(tasks)
-        # Launch initial workers
-        for _ in range(self.max_workers):
-            try:
-                task = next(tasks_iter)
-            except StopIteration:
-                break
-            t = threading.Thread(target=task)
-            self._threads.append(t)
-            t.start()
-        # Run remaining tasks sequentially
-        for task in tasks_iter:
-            task()
-        # Wait for threads to complete
-        for t in self._threads:
-            t.join()
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.shutdown(wait=True)
+
+    def submit(self, task: Callable[[], T]) -> Future[T]:
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix='fileops-worker')
+        future = self._executor.submit(task)
+        self._futures.append(future)
+        return future
+
+    def run_tasks(
+        self,
+        tasks: Iterable[Callable[[], T]],
+        progress_callback: Optional[Callable[[T], None]] = None,
+    ) -> List[T]:
+        """Run callables and return their results."""
+        results: List[T] = []
+        for task in tasks:
+            self.submit(task)
+
+        while self._futures:
+            done, _ = wait(self._futures, return_when=FIRST_COMPLETED)
+            for future in list(done):
+                self._futures.remove(future)
+                result = future.result()
+                results.append(result)
+                if progress_callback:
+                    progress_callback(result)
+        return results
+
+    def shutdown(self, wait: bool = False) -> None:
+        if self._executor:
+            self._executor.shutdown(wait=wait)
+            self._executor = None
+        self._futures.clear()

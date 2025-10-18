@@ -1,23 +1,42 @@
+# Bytecode and compiled artefacts
 __pycache__/
 *.py[cod]
 *$py.class
-
 *.so
 
+# Python packaging outputs
 .Python
 dist/
 build/
 *.egg-info/
+pip-wheel-metadata/
 
+# Virtual environments
 .venv/
 venv/
+.env
+.python-version
 
+# Coverage / test artefacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Generated runtime logs and reports
 logs/
 *.log
 *.csv
 *.json
 errors.log
 
+# Sample data staging
+data/
+
+# Tooling metadata
 .vscode/
 .idea/
 *.swp
+.DS_Store
